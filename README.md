@@ -20,7 +20,7 @@ for compliance, incident response, and accountability.
 ## Install
 
 ```bash
-pip install agentlens
+pip install agentlens-io
 ```
 
 ## Usage
