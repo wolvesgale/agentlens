@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentlens-io"
-version = "0.2.0"
+version = "0.3.0"
 description = "Audit logging for Claude AI agents — transparent, tamper-evident, OSS"
 readme = "README.md"
 license = "MIT"
@@ -16,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["psycopg2-binary>=2.9"]
 dev = ["pytest", "pytest-asyncio", "anthropic", "psycopg2-binary>=2.9"]
+
+[project.scripts]
+agentlens = "agentlens.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/agentlens-io/agentlens"
