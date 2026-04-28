@@ -1,15 +1,16 @@
 import uuid
 from dataclasses import asdict
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 import anthropic
 
-from .models import ToolUseEvent, ToolResultEvent
+from .models import ToolUseEvent, ToolResultEvent, PreExecutionBlockedError
 from .rules import check, Violation
 from .writers.base import BaseWriter
 from .writers.file import FileWriter
 
-OnViolation = Callable[[ToolUseEvent, List[Violation]], None]
+OnViolation    = Callable[[ToolUseEvent, List[Violation]], None]
+OnPreExecution = Callable[[ToolUseEvent, List[Violation]], None]
 
 
 def _default_on_violation(event: ToolUseEvent, violations: List[Violation]) -> None:
@@ -20,12 +21,25 @@ def _default_on_violation(event: ToolUseEvent, violations: List[Violation]) -> N
         )
 
 
+def _make_pre_execution_hook(block_on_critical: bool) -> OnPreExecution:
+    """Returns a pre-execution hook that raises PreExecutionBlockedError on critical violations."""
+    def hook(event: ToolUseEvent, violations: List[Violation]) -> None:
+        if block_on_critical and any(v.severity == "critical" for v in violations):
+            raise PreExecutionBlockedError(event, violations)
+    return hook
+
+
 class AuditedMessages:
     """Wraps anthropic.resources.Messages.
-    Intercepts every create() call to capture:
-      - tool_use blocks in the response  (what Claude decided to do)
-      - tool_result blocks in the input  (what actually came back)
+    Intercepts every create() call to:
+      1. Capture tool_result blocks in inbound messages (post-execution facts)
+      2. Capture tool_use blocks in the response (what Claude decided to do)
+      3. Run danger rules — emit violations via on_violation
+      4. Run pre-execution hook — can raise PreExecutionBlockedError to stop execution
+
     The original request/response is never modified.
+    If PreExecutionBlockedError is raised, the event is written to the log first,
+    then the exception propagates to the caller — response is withheld.
     """
 
     def __init__(
@@ -34,14 +48,16 @@ class AuditedMessages:
         writer: BaseWriter,
         session_id: str,
         on_violation: OnViolation,
+        on_pre_execution: OnPreExecution,
     ):
         self._client = client
         self._writer = writer
         self._session_id = session_id
         self._on_violation = on_violation
+        self._on_pre_execution = on_pre_execution
 
     def create(self, **kwargs) -> Any:
-        # --- Capture tool_result blocks from inbound messages ---
+        # ── 1. Capture tool_result blocks from inbound messages ──
         for msg in kwargs.get("messages", []):
             if msg.get("role") != "user":
                 continue
@@ -57,24 +73,41 @@ class AuditedMessages:
                         session_id=self._session_id,
                     ))
 
-        # --- Forward to Anthropic API (read-only, no modification) ---
+        # ── 2. Forward to Anthropic API (read-only) ──
         response = self._client.messages.create(**kwargs)
 
-        # --- Capture tool_use blocks from response ---
+        # ── 3 & 4. Capture tool_use → check rules → pre-execution gate ──
+        block_to_raise: Optional[Tuple[PreExecutionBlockedError]] = None
+
         for block in response.content:
-            if getattr(block, "type", None) == "tool_use":
-                event = ToolUseEvent(
-                    tool_use_id=block.id,
-                    tool_name=block.name,
-                    tool_input=block.input,
-                    model=response.model,
-                    session_id=self._session_id,
-                )
-                violations = check(event)
-                if violations:
-                    event.violations = [asdict(v) for v in violations]
-                    self._on_violation(event, violations)
-                self._writer.write(event)
+            if getattr(block, "type", None) != "tool_use":
+                continue
+
+            event = ToolUseEvent(
+                tool_use_id=block.id,
+                tool_name=block.name,
+                tool_input=block.input,
+                model=response.model,
+                session_id=self._session_id,
+            )
+            violations = check(event)
+            if violations:
+                event.violations = [asdict(v) for v in violations]
+                self._on_violation(event, violations)
+
+            # Always write to audit log first (forensic completeness)
+            self._writer.write(event)
+
+            # Pre-execution gate: run hook; if it raises, capture for re-raise after full loop
+            if violations and block_to_raise is None:
+                try:
+                    self._on_pre_execution(event, violations)
+                except PreExecutionBlockedError as exc:
+                    block_to_raise = exc
+
+        # Raise after all events are logged so the audit trail is complete
+        if block_to_raise is not None:
+            raise block_to_raise
 
         return response
 
@@ -82,17 +115,33 @@ class AuditedMessages:
 class AuditedAnthropic:
     """Drop-in replacement for anthropic.Anthropic that adds audit logging.
 
-    Usage:
+    Usage — basic:
         from agentlens import AuditedAnthropic
 
         client = AuditedAnthropic(log_path="./audit.jsonl")
         # Use exactly like anthropic.Anthropic()
+
+    Usage — block critical violations before execution:
+        client = AuditedAnthropic(
+            log_path="./audit.jsonl",
+            block_on_critical=True,
+        )
+        # Raises PreExecutionBlockedError when Claude attempts rm -rf /, key exfiltration, etc.
+
+    Usage — custom pre-execution hook:
+        def my_hook(event, violations):
+            send_slack_alert(violations)
+            if any(v.severity == "critical" for v in violations):
+                raise PreExecutionBlockedError(event, violations)
+
+        client = AuditedAnthropic(on_pre_execution=my_hook)
 
     Design principles:
         - Read-only interception: requests/responses are never altered
         - Append-only writes: log entries cannot be edited after creation
         - Logger is deterministic code, not an LLM
         - Data stays local by default (FileWriter)
+        - Pre-execution blocking is opt-in (block_on_critical=False by default)
     """
 
     def __init__(
@@ -101,12 +150,25 @@ class AuditedAnthropic:
         log_path: str = "./agentlens_audit.jsonl",
         session_id: Optional[str] = None,
         on_violation: Optional[OnViolation] = None,
+        on_pre_execution: Optional[OnPreExecution] = None,
+        block_on_critical: bool = False,
         **anthropic_kwargs,
     ):
         self._client = anthropic.Anthropic(**anthropic_kwargs)
         self._writer = writer or FileWriter(log_path)
         self._session_id = session_id or str(uuid.uuid4())
         self._on_violation = on_violation or _default_on_violation
+
+        # on_pre_execution priority: explicit hook > block_on_critical flag > no-op
+        if on_pre_execution is not None:
+            self._on_pre_execution = on_pre_execution
+        else:
+            self._on_pre_execution = _make_pre_execution_hook(block_on_critical)
+
         self.messages = AuditedMessages(
-            self._client, self._writer, self._session_id, self._on_violation
+            self._client,
+            self._writer,
+            self._session_id,
+            self._on_violation,
+            self._on_pre_execution,
         )

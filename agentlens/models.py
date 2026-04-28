@@ -8,6 +8,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class PreExecutionBlockedError(Exception):
+    """Raised when a pre-execution hook blocks a tool call before it reaches the caller.
+
+    Attributes:
+        event      : ToolUseEvent that was blocked (already written to the audit log)
+        violations : list of Violation that triggered the block
+    """
+    def __init__(self, event: "ToolUseEvent", violations: list) -> None:
+        self.event = event
+        self.violations = violations
+        rule_ids = ", ".join(getattr(v, "rule_id", str(v)) for v in violations)
+        super().__init__(
+            f"[agentlens] Tool '{event.tool_name}' blocked before execution: {rule_ids}"
+        )
+
+
 @dataclass
 class ToolUseEvent:
     """Emitted when Claude decides to call a tool."""
