@@ -180,6 +180,62 @@ def cmd_summary(path: Path) -> None:
     print()
 
 
+def cmd_verify(path: Path) -> None:
+    """ハッシュチェーンを検証し、改ざんを検知する。"""
+    import hashlib
+
+    _GENESIS = "agentlens_genesis_v0.4.0"
+
+    def sha256(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    if not path.exists():
+        print(f"[error] ファイルが見つかりません: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    entries = []
+    with open(path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append((lineno, json.loads(line)))
+            except json.JSONDecodeError:
+                print(_c(f"[line {lineno}] JSONパースエラー", RED))
+                sys.exit(1)
+
+    if not entries:
+        print(_c("エントリがありません。", DIM))
+        return
+
+    prev_hash = sha256(_GENESIS)
+    broken_at = None
+
+    for lineno, entry in entries:
+        stored_hash = entry.get("entry_hash", "")
+        if not stored_hash:
+            print(_c(f"[line {lineno}] entry_hash フィールドなし（v0.3以前のログ）", YELLOW))
+            continue
+
+        # ハッシュフィールドを除いた内容で再計算
+        content_dict = {k: v for k, v in entry.items() if k != "entry_hash"}
+        content = json.dumps(content_dict, ensure_ascii=False)
+        expected = sha256(prev_hash + content)
+
+        if stored_hash != expected:
+            broken_at = lineno
+            print(_c(f"❌ 改ざん検知: line {lineno}  tool={entry.get('tool_name') or entry.get('event_type', '?')}", RED + BOLD))
+            print(f"   stored  : {stored_hash[:16]}…")
+            print(f"   expected: {expected[:16]}…")
+            break
+
+        prev_hash = stored_hash
+
+    if broken_at is None:
+        print(_c(f"✅ チェーン整合性OK  ({len(entries)} エントリ)", GREEN + BOLD))
+
+
 def main(argv: Optional[list] = None) -> None:
     args = (argv if argv is not None else sys.argv)[1:]
 
@@ -187,6 +243,7 @@ def main(argv: Optional[list] = None) -> None:
         print("使い方:")
         print("  python -m agentlens view <file.jsonl> [--session ID] [--violations-only]")
         print("  python -m agentlens summary <file.jsonl>")
+        print("  python -m agentlens verify <file.jsonl>")
         sys.exit(1)
 
     if not args:
@@ -214,6 +271,11 @@ def main(argv: Optional[list] = None) -> None:
         if len(args) < 2:
             usage()
         cmd_summary(Path(args[1]))
+
+    elif subcmd == "verify":
+        if len(args) < 2:
+            usage()
+        cmd_verify(Path(args[1]))
 
     else:
         usage()

@@ -35,9 +35,15 @@ class ToolUseEvent:
     timestamp: str = field(default_factory=_now)
     session_id: Optional[str] = None
     violations: List[dict] = field(default_factory=list)  # populated by rules.check()
+    entry_hash: str = ""  # SHA-256 hash chain (set by FileWriter)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
+
+    def to_json_without_hash(self) -> str:
+        d = asdict(self)
+        d.pop("entry_hash", None)
+        return json.dumps(d, ensure_ascii=False)
 
 
 @dataclass
@@ -49,6 +55,12 @@ class ToolResultEvent:
     is_error: bool = False
     timestamp: str = field(default_factory=_now)
     session_id: Optional[str] = None
+    entry_hash: str = ""  # SHA-256 hash chain (set by FileWriter)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
+
+    def to_json_without_hash(self) -> str:
+        d = asdict(self)
+        d.pop("entry_hash", None)
+        return json.dumps(d, ensure_ascii=False)
