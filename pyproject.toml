@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentlens-io"
-version = "0.3.1"
+version = "0.4.0"
 description = "Audit logging for Claude AI agents — transparent, tamper-evident, OSS"
 readme = "README.md"
 license = "MIT"
