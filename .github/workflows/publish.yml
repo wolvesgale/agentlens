@@ -24,9 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write      # Trusted Publishing (PyPI OIDC)
-      attestations: write  # digital attestations
-      contents: read
+      id-token: write   # Trusted Publishing (PyPI OIDC)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,3 +33,5 @@ jobs:
       - run: pip install build
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: false
